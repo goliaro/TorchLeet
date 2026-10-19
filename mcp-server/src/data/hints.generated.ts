@@ -286,12 +286,12 @@ export const authoredHints: Record<string, string[]> = {
  "rotary-positional-embedding": [
   "rotate_half splits the last dim in two and returns (-x2, x1) concatenated.",
   "Rotated q = q*cos + rotate_half(q)*sin — the 2D rotation written elementwise.",
-  "cos and sin must broadcast against (batch, heads, seq, dim)."
+  "Cache cos and sin as buffers shaped so they broadcast over (batch, heads, seq, dim). Pair i uses frequency 1/10000**(2i/dim), shared by both halves."
  ],
  "v2-11": [
   "rotate_half splits the last dim in two and returns (-x2, x1) concatenated.",
   "Rotated q = q*cos + rotate_half(q)*sin — the 2D rotation written elementwise.",
-  "cos and sin must broadcast against (batch, heads, seq, dim)."
+  "Cache cos and sin as buffers shaped so they broadcast over (batch, heads, seq, dim). Pair i uses frequency 1/10000**(2i/dim), shared by both halves."
  ],
  "smollm": [
   "rotate_half splits the last dim in half and returns (-x2, x1) concatenated.",

@@ -176,6 +176,63 @@ def rope_query_only(q, k, cos, sin):
     return q * cos + rotate_half(q) * sin, k
 
 
+class _RopeCache(nn.Module):
+    """Shared cache. Subclasses decide the tensor layout."""
+
+    def __init__(self, dim, base=10000.0):
+        super().__init__()
+        inv = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(base) / dim))
+        self.register_buffer("inv_freq", inv)
+        self.register_buffer("cos_cached", torch.empty(0), persistent=False)
+        self.register_buffer("sin_cached", torch.empty(0), persistent=False)
+
+    def _tables(self, seq, device, dtype):
+        t = torch.arange(seq, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq.to(device))
+        emb = torch.cat((freqs, freqs), dim=-1).to(dtype=dtype)
+        return emb.cos(), emb.sin()
+
+
+class Rotary(_RopeCache):
+    """(1, 1, seq, dim), the layout the notebook asks for."""
+
+    def forward(self, x, seq_dim=2):
+        seq = x.shape[seq_dim]
+        cos, sin = self._tables(seq, x.device, x.dtype)
+        self.cos_cached = cos[None, None, :, :]
+        self.sin_cached = sin[None, None, :, :]
+        return self.cos_cached, self.sin_cached
+
+
+class FlatRotary(_RopeCache):
+    """Same angles, stored as (seq, dim). Still broadcasts over batch and heads."""
+
+    def forward(self, x, seq_dim=2):
+        seq = x.shape[seq_dim]
+        self.cos_cached, self.sin_cached = self._tables(seq, x.device, x.dtype)
+        return self.cos_cached, self.sin_cached
+
+
+class SeqFirstRotary(_RopeCache):
+    """Broken: (seq, 1, 1, dim) only broadcasts with sequence-first tensors."""
+
+    def forward(self, x, seq_dim=2):
+        seq = x.shape[seq_dim]
+        cos, sin = self._tables(seq, x.device, x.dtype)
+        self.cos_cached = cos[:, None, None, :]
+        self.sin_cached = sin[:, None, None, :]
+        return self.cos_cached, self.sin_cached
+
+
+class WrongFreqRotary(Rotary):
+    """Broken: a fresh frequency per raw dimension, so the halves disagree."""
+
+    def __init__(self, dim, base=10000.0):
+        super().__init__(dim, base)
+        i = torch.arange(dim // 2).float()
+        self.inv_freq.copy_(1.0 / (base ** (i / dim)))
+
+
 # --------------------------------------------------------- gradient checkpointing
 class CkptFn(torch.autograd.Function):
     @staticmethod
@@ -236,9 +293,12 @@ CASES = [
     ("cnn canonical", True, "cnn", (Cnn,), {}),
     ("cnn divergent", True, "cnn", (DivergentCnn,), {}),
     ("cnn wrong classes", False, "cnn", (WrongClassCount,), {}),
-    ("rope correct", True, "rotary-positional-embedding", (rotate_half, rope_apply), {}),
-    ("rope no-op", False, "rotary-positional-embedding", (rotate_half, rope_noop), {}),
-    ("rope query only", False, "rotary-positional-embedding", (rotate_half, rope_query_only), {}),
+    ("rope correct", True, "rotary-positional-embedding", (Rotary, rotate_half, rope_apply), {}),
+    ("rope flat cache", True, "rotary-positional-embedding", (FlatRotary, rotate_half, rope_apply), {}),
+    ("rope no-op", False, "rotary-positional-embedding", (Rotary, rotate_half, rope_noop), {}),
+    ("rope query only", False, "rotary-positional-embedding", (Rotary, rotate_half, rope_query_only), {}),
+    ("rope seq-first cache", False, "rotary-positional-embedding", (SeqFirstRotary, rotate_half, rope_apply), {}),
+    ("rope wrong frequency", False, "rotary-positional-embedding", (WrongFreqRotary, rotate_half, rope_apply), {}),
     ("ckpt correct", True, "gradient-checkpointing", (CkptFn, ckpt), {}),
     ("ckpt no dummy input", False, "gradient-checkpointing", (CkptFn, ckpt_no_dummy), {}),
     ("ckpt inputs-only grads", False, "gradient-checkpointing", (CkptFnInputsOnly, ckpt_inputs_only), {}),

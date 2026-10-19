@@ -5,19 +5,50 @@ rotate_half twice negates the vector, and rotating with a unit (cos, sin) pair
 preserves the norm. Neither of those, nor the zero-angle check, can tell a real
 rotation from returning q and k untouched, so check_quarter_turn pins the angle:
 at cos=0, sin=1 the result must be exactly rotate_half of the input.
+
+Rotary itself must publish the paper frequencies and a cos/sin table that
+broadcasts over (batch, heads, seq, dim). Any shape that broadcasts is accepted;
+a sequence-first cache of shape (seq, 1, 1, dim) does not.
 """
+import math
 import torch
 
-ENTRIES = ["rotate_half", "apply_rotary_pos_emb"]
+ENTRIES = ["Rotary", "rotate_half", "apply_rotary_pos_emb"]
 DEVICE = "cpu"
 EXTRAS = []
 HINTS = [
     "rotate_half splits the last dim in two and returns (-x2, x1) concatenated.",
     "Rotated q = q*cos + rotate_half(q)*sin — the 2D rotation written elementwise.",
-    "cos and sin must broadcast against (batch, heads, seq, dim).",
+    "Cache cos and sin as buffers shaped so they broadcast over (batch, heads, seq, dim). Pair i uses frequency 1/10000**(2i/dim), shared by both halves.",
 ]
 
 B, H, S, D = 2, 4, 8, 16
+
+
+def _angles(seq, dim, base=10000.0):
+    """(seq, dim) of pos/base**(2i/dim), duplicated across the two halves."""
+    inv = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(base) / dim))
+    freqs = torch.outer(torch.arange(seq).float(), inv)
+    return torch.cat((freqs, freqs), dim=-1)
+
+
+def _position_table(cached, seq):
+    """Broadcast `cached` against (batch, heads, seq, dim) and return (seq, dim)."""
+    try:
+        mixed = torch.zeros(B, H, seq, D) + cached
+    except RuntimeError as e:
+        raise AssertionError(
+            f"cos/sin of shape {tuple(cached.shape)} do not broadcast against "
+            f"(batch, heads, seq, dim) = {(B, H, seq, D)}"
+        ) from e
+    assert tuple(mixed.shape) == (B, H, seq, D), (
+        f"cos/sin of shape {tuple(cached.shape)} broadcast to {tuple(mixed.shape)}, "
+        f"expected {(B, H, seq, D)}"
+    )
+    assert torch.allclose(mixed, mixed[:1, :1].expand_as(mixed), atol=1e-5), (
+        "the rotation must depend on position only, not on the batch or head index"
+    )
+    return mixed[0, 0]
 
 
 def check_rotate_half_shape(ns):
@@ -83,6 +114,46 @@ def check_rotation_preserves_norm(ns):
         "rotation changed the vector norms — check the cos/sin pairing"
 
 
+def _module(ns):
+    return ns.Rotary(D)
+
+
+def check_frequencies(ns):
+    """ω_i = 1/10000**(2i/dim), shared by feature i and feature i + dim/2."""
+    cos, sin = _module(ns)(torch.zeros(B, H, S, D))
+    angles = _angles(S, D)
+    assert torch.allclose(_position_table(cos, S), angles.cos(), atol=1e-5), (
+        "cos is not cos(pos / 10000**(2i/dim)); i runs over 0 .. dim/2 - 1 "
+        "and the two halves share that frequency"
+    )
+    assert torch.allclose(_position_table(sin, S), angles.sin(), atol=1e-5), (
+        "sin does not match the same angles as cos"
+    )
+
+
+def check_cache_tracks_length(ns):
+    m = _module(ns)
+    short = S // 2
+    m(torch.zeros(B, H, S, D))
+    cos, _ = m(torch.zeros(B, H, short, D))
+    _position_table(cos, short)
+
+
+def check_cached_tables_are_buffers(ns):
+    """Buffers follow .to(device). Plain attributes do not."""
+    m = _module(ns)
+    cos, sin = m(torch.zeros(B, H, S, D))
+    bufs = [t for _, t in m.named_buffers() if torch.is_tensor(t)]
+    assert any(t.data_ptr() == cos.data_ptr() for t in bufs), (
+        "register the cached cos tensor as a buffer so it stays on x's device"
+    )
+    assert any(t.data_ptr() == sin.data_ptr() for t in bufs), (
+        "register the cached sin tensor as a buffer so it stays on x's device"
+    )
+
+
 CHECKS = [check_rotate_half_shape, check_rotate_half_twice_negates,
           check_rotate_half_permutes_values, check_identity_rotation,
-          check_quarter_turn, check_rotation_preserves_norm]
+          check_quarter_turn, check_rotation_preserves_norm,
+          check_frequencies, check_cache_tracks_length,
+          check_cached_tables_are_buffers]

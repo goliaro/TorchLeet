@@ -13,7 +13,7 @@ tracks = ["advanced", "llm-path"]
 hints = [
   "rotate_half splits the last dim in two and returns (-x2, x1) concatenated.",
   "Rotated q = q*cos + rotate_half(q)*sin — the 2D rotation written elementwise.",
-  "cos and sin must broadcast against (batch, heads, seq, dim).",
+  "Cache cos and sin as buffers shaped so they broadcast over (batch, heads, seq, dim). Pair i uses frequency 1/10000**(2i/dim), shared by both halves.",
 ]
 
 [notebooks]
@@ -21,8 +21,8 @@ question = "rope-q8-Question.ipynb"
 solution = "rope-q8.ipynb"
 
 [grading]
-tier = "C"        # A=auto-graded B=partial C=not auto-graded (SEEDED, confirm)
-entries = ["rotate_half", "apply_rotary_pos_emb"]
+tier = "A"        # A=auto-graded B=partial C=not auto-graded (SEEDED, confirm)
+entries = ["Rotary", "rotate_half", "apply_rotary_pos_emb"]
 extras = []
 device = "cpu"
 
